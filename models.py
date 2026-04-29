@@ -554,4 +554,10 @@ class SignToTextModel(nn.Module):
         if self.use_attention_pooling:
             z = self.attention_pool(z)
         z = self.adapter(z)
+        
+        # Add default decoding constraints to prevent repetition
+        kwargs.setdefault("repetition_penalty", 2.5)
+        kwargs.setdefault("no_repeat_ngram_size", 3)
+        kwargs.setdefault("length_penalty", 1.0)
+        
         return self.t5.generate(inputs_embeds=z, **kwargs)

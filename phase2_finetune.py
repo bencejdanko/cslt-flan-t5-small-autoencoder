@@ -266,12 +266,20 @@ def train_phase2(cfg: Phase2Config):
 
                 # Manual loss calculation with Label Smoothing
                 logits = t5_output.logits
-                loss = torch.nn.functional.cross_entropy(
+                t5_loss = torch.nn.functional.cross_entropy(
                     logits.view(-1, logits.size(-1)), 
                     labels.view(-1), 
                     label_smoothing=cfg.label_smoothing, 
                     ignore_index=-100
                 )
+
+                # Add Latent Regularization to keep encoder healthy during finetuning
+                z = model.encoder(features, src_key_padding_mask=padding_mask)
+                z_mean = torch.mean(z)
+                z_var = torch.var(z)
+                reg_loss = z_mean**2 + (z_var - 1)**2
+                
+                loss = t5_loss + 0.1 * reg_loss # Keep the encoder spread out
 
                 if ctc_log_probs is not None:
                     # CTC loss with pseudo-targets (self-supervised alignment)
@@ -372,14 +380,24 @@ def train_phase2(cfg: Phase2Config):
         metrics["val_loss"] = avg_val_loss
         metrics["train_loss"] = avg_train_loss
 
+        # Latent stats for health check
+        z_all = []
+        with torch.no_grad():
+            for batch in val_loader:
+                f = {k: v.to(device) for k, v in batch["features"].items()}
+                m = batch["padding_mask"].to(device)
+                z_all.append(model.encoder(f, src_key_padding_mask=m).cpu())
+        z_all = torch.cat([z.reshape(-1, z.size(-1)) for z in z_all])
+        metrics["z_std"] = z_all.std().item()
+        metrics["z_mean"] = z_all.mean().item()
+
         logger.info(
             f"Epoch {epoch+1}/{cfg.epochs} | "
             f"train_loss={avg_train_loss:.4f} | "
             f"val_loss={avg_val_loss:.4f} | "
+            f"z_std={metrics['z_std']:.4f} | "
             f"BLEU={metrics['bleu']:.2f} | "
-            f"ROUGE-L={metrics['rouge_l']:.2f} | "
-            f"chrF={metrics['chrf']:.2f} | "
-            f"EM={metrics['exact_match']:.1f}%"
+            f"ROUGE-L={metrics['rouge_l']:.2f}"
         )
 
         print_sample_predictions(all_preds, all_refs, n=3)
