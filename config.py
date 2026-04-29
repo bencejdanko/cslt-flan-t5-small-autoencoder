@@ -120,6 +120,7 @@ class Phase1Config:
     log_backend: str = "csv"  # "csv", "jsonl", "wandb", "tensorboard"
     wandb_project: str = "cslt-phase1"
     log_every_n_steps: int = 10
+    shuffle_buffer: int = 1000
 
     # Smoke test
     smoke_test: bool = False
@@ -198,6 +199,7 @@ class Phase2Config:
     log_backend: str = "csv"
     wandb_project: str = "cslt-phase2"
     log_every_n_steps: int = 10
+    shuffle_buffer: int = 1000
 
     # Smoke test
     smoke_test: bool = False

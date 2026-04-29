@@ -157,6 +157,7 @@ def train_phase2(cfg: Phase2Config):
         tokenizer=tokenizer,
         max_target_length=cfg.max_target_length,
         phase=2,
+        shuffle_buffer=cfg.shuffle_buffer,
     )
     val_loader = create_dataloader(
         split="validation",

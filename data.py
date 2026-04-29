@@ -100,15 +100,22 @@ class UtteranceLevelDataset(IterableDataset):
         split: str = "train",
         max_samples: Optional[int] = None,
         repo_id: str = "bdanko/how2sign-landmarks-front-raw-parquet",
+        shuffle_buffer: int = 1000,
     ):
         self.split = split
         self.max_samples = max_samples
         self.repo_id = repo_id
+        self.shuffle_buffer = shuffle_buffer
 
     def __iter__(self):
         from datasets import load_dataset
 
         ds = load_dataset(self.repo_id, split=self.split, streaming=True)
+        
+        # Apply shuffling if split is 'train' and buffer > 0
+        if "train" in self.split and self.shuffle_buffer > 0:
+            ds = ds.shuffle(seed=None, buffer_size=self.shuffle_buffer)
+            
         count = 0
         for sample in ds:
             if self.max_samples and count >= self.max_samples:
@@ -226,10 +233,12 @@ def create_dataloader(
     tokenizer=None,
     max_target_length: int = 128,
     phase: int = 1,
+    shuffle_buffer: int = 1000,
 ) -> DataLoader:
     """Create a DataLoader with the utterance-level dataset and collator."""
     dataset = UtteranceLevelDataset(
-        split=split, max_samples=max_samples, repo_id=repo_id
+        split=split, max_samples=max_samples, repo_id=repo_id,
+        shuffle_buffer=shuffle_buffer
     )
     collator = SignLanguageCollator(
         tokenizer=tokenizer,

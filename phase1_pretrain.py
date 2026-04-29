@@ -100,6 +100,7 @@ def train_phase1(cfg: Phase1Config):
         max_samples=cfg.max_samples,
         repo_id=cfg.dataset_repo,
         phase=1,
+        shuffle_buffer=cfg.shuffle_buffer,
     )
     val_loader = create_dataloader(
         split="validation",
@@ -107,6 +108,7 @@ def train_phase1(cfg: Phase1Config):
         max_samples=cfg.val_max_samples,
         repo_id=cfg.dataset_repo,
         phase=1,
+        shuffle_buffer=cfg.shuffle_buffer,
     )
 
     # --- Models ---
