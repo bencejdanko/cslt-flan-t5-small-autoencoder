@@ -5,6 +5,8 @@ numpy>=1.24
 # Data
 datasets>=2.14
 huggingface_hub>=0.16
+pyarrow>=14
+pandas>=2.0
 
 # Models
 transformers>=4.35

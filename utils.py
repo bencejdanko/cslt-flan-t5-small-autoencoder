@@ -719,3 +719,33 @@ def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
+
+
+def resolve_device(requested: str) -> str:
+    """
+    Resolve a user-requested device string.
+
+    requested:
+      - "auto" -> "cuda" if available else "cpu"
+      - "cuda" / "cuda:0" etc -> "cuda" if available else "cpu"
+      - "cpu" -> "cpu"
+    """
+    req = (requested or "auto").strip().lower()
+    if req == "auto":
+        return get_device()
+    if req.startswith("cuda"):
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return "cpu"
+
+
+def enable_torch_gpu_perf_knobs(device: str):
+    """Enable safe speed knobs when running on NVIDIA GPUs."""
+    if device.startswith("cuda") and torch.cuda.is_available():
+        try:
+            torch.backends.cudnn.benchmark = True
+        except Exception:
+            pass
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass

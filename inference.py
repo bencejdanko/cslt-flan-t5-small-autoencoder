@@ -28,7 +28,7 @@ from transformers import T5Tokenizer
 
 from config import InferenceConfig, load_config_dict, parse_inference_args
 from data import engineer_features_multistream
-from models import MultiStreamSemanticEncoder, SignToTextModel
+from models import SignToTextModel, build_encoder_from_config
 from utils import get_device, set_seed
 
 logging.basicConfig(
@@ -57,15 +57,22 @@ def load_model_for_inference(ckpt_dir: str, device: str = "cuda", tag: str = "be
         logger.warning("No config.json found, using defaults")
         cfg_dict = {}
 
-    # Build model
-    encoder = MultiStreamSemanticEncoder(
-        d_model=cfg_dict.get("d_model", 384),
-        latent_dim=cfg_dict.get("latent_dim", 512),
-        num_layers=cfg_dict.get("encoder_layers", 3),
-        nhead=cfg_dict.get("encoder_heads", 8),
-        dropout=0.0,  # No dropout at inference
-        use_part_embeddings=cfg_dict.get("use_part_embeddings", True),
-    )
+    # Build encoder from checkpoint config (fallbacks to transformer)
+    class _Cfg:
+        pass
+
+    cfg = _Cfg()
+    cfg.d_model = cfg_dict.get("d_model", 384)
+    cfg.latent_dim = cfg_dict.get("latent_dim", 512)
+    cfg.encoder_layers = cfg_dict.get("encoder_layers", 3)
+    cfg.encoder_heads = cfg_dict.get("encoder_heads", 8)
+    cfg.encoder_dropout = 0.0  # No dropout at inference
+    cfg.use_part_embeddings = cfg_dict.get("use_part_embeddings", True)
+    cfg.encoder_arch = cfg_dict.get("encoder_arch", "transformer")
+    cfg.conformer_ff_mult = cfg_dict.get("conformer_ff_mult", 4)
+    cfg.conformer_conv_kernel = cfg_dict.get("conformer_conv_kernel", 7)
+
+    encoder = build_encoder_from_config(cfg)
 
     t5_name = cfg_dict.get("t5_name", "google/flan-t5-small")
 
@@ -162,7 +169,14 @@ def run_inference(cfg: InferenceConfig):
     # Load samples from dataset
     from datasets import load_dataset
 
-    ds = load_dataset(cfg.dataset_repo, split="validation", streaming=True)
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    if token:
+        try:
+            ds = load_dataset(cfg.dataset_repo, split="validation", streaming=True, token=token)
+        except TypeError:
+            ds = load_dataset(cfg.dataset_repo, split="validation", streaming=True, use_auth_token=token)
+    else:
+        ds = load_dataset(cfg.dataset_repo, split="validation", streaming=True)
 
     print("\n" + "=" * 70)
     print("CSLT Inference — Sign Language → English Translation")

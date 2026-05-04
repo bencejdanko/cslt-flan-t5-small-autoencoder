@@ -1,0 +1,30 @@
+# Windows (Python 3.12) stable pins for HF datasets/parquet.
+#
+# Use this file if you see "Windows fatal exception: access violation" inside
+# pyarrow/pandas/datasets imports when streaming or loading parquet datasets.
+#
+# Install:
+#   py -3.12 -m pip install -U pip
+#   py -3.12 -m pip install -r requirements-windows-py312-cu121.txt --index-url https://download.pytorch.org/whl/cu121 --extra-index-url https://pypi.org/simple
+
+# CUDA torch
+torch
+torchvision
+torchaudio
+
+# Core
+numpy>=1.24
+tqdm>=4.65
+
+# HF stack (pinned for stability)
+datasets==2.20.0
+huggingface_hub>=0.23.0
+transformers>=4.35
+sentencepiece>=0.1.99
+
+# Parquet stack (pinned)
+pyarrow==16.1.0
+pandas==2.2.2
+
+# Eval
+sacrebleu>=2.3

@@ -10,6 +10,7 @@ Key design decisions:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -27,6 +28,65 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _get_hf_token() -> Optional[str]:
+    """
+    Return a HuggingFace read token from the environment, if present.
+
+    Supported env vars (checked in this order):
+      - HF_TOKEN
+      - HUGGINGFACE_HUB_TOKEN
+    """
+    return os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+
+
+def _load_hf_dataset(repo_id: str, split: str, streaming: bool):
+    """
+    Wrapper around datasets.load_dataset that passes an auth token when provided.
+    Compatible with datasets versions that accept either `token=` or `use_auth_token=`.
+    """
+    from datasets import load_dataset
+
+    def _call(**kwargs):
+        token = _get_hf_token()
+        if token:
+            try:
+                return load_dataset(repo_id, split=split, streaming=streaming, token=token, **kwargs)
+            except TypeError:
+                return load_dataset(
+                    repo_id, split=split, streaming=streaming, use_auth_token=token, **kwargs
+                )
+        return load_dataset(repo_id, split=split, streaming=streaming, **kwargs)
+
+    try:
+        return _call()
+    except TypeError as e:
+        # Some datasets publish incomplete/invalid dataset-card feature specs that can
+        # trip up pyarrow dtype parsing. If that happens, bypass card parsing by
+        # providing an explicit minimal Features schema.
+        msg = str(e)
+        if "list_() takes at least 1 positional argument" not in msg:
+            raise
+
+        from datasets import Features, Value, Sequence
+
+        minimal_features = Features(
+            {
+                # Stored as a byte buffer containing float32 landmark arrays.
+                "features": Value("binary"),
+                # Shape of the underlying landmark array (e.g. [T, 543, 3]).
+                "shape": Sequence(Value("int32")),
+                # English sentence label (may be missing for some rows).
+                "sentence": Value("string"),
+                # Some shards include ids; keep as optional string if present.
+                "video_id": Value("string"),
+            }
+        )
+        logger.warning(
+            "load_dataset failed due to dataset-card feature parsing; retrying with explicit Features override."
+        )
+        return _call(features=minimal_features, save_infos=False)
+
 
 # ---------------------------------------------------------------------------
 # Feature engineering
@@ -106,8 +166,7 @@ class UtteranceLevelStreamingDataset(IterableDataset):
         self.shuffle_buffer = shuffle_buffer
 
     def __iter__(self):
-        from datasets import load_dataset
-        ds = load_dataset(self.repo_id, split=self.split, streaming=True)
+        ds = _load_hf_dataset(self.repo_id, split=self.split, streaming=True)
         if "train" in self.split and self.shuffle_buffer > 0:
             ds = ds.shuffle(seed=None, buffer_size=self.shuffle_buffer)
         
@@ -123,9 +182,8 @@ class UtteranceLevelStreamingDataset(IterableDataset):
 class UtteranceLevelMapDataset(Dataset):
     """Local version (Map-style)."""
     def __init__(self, split, repo_id, max_samples):
-        from datasets import load_dataset
         logger.info(f"Loading/Downloading dataset split '{split}'...")
-        self.ds = load_dataset(repo_id, split=split, streaming=False)
+        self.ds = _load_hf_dataset(repo_id, split=split, streaming=False)
         if max_samples:
             self.ds = self.ds.select(range(min(max_samples, len(self.ds))))
         logger.info(f"Dataset loaded: {len(self.ds)} samples.")

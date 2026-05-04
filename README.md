@@ -13,6 +13,56 @@ This project implements a two-phase pipeline for Continuous Sign Language Transl
 
 At inference time, the diffusion decoder is discarded — only the encoder, adapter, and T5 remain.
 
+## Encoder Variants
+
+This repo supports two interchangeable landmark encoders:
+
+- `encoder_arch=transformer` (default): `MultiStreamSemanticEncoder` (temporal Transformer)
+- `encoder_arch=conformer`: `MultiStreamConformerEncoder` (Conformer blocks: MHSA + conv module)
+
+To train with the Conformer encoder:
+
+```bash
+python phase1_pretrain.py --encoder_arch conformer --encoder_layers 4 --encoder_heads 8 --conformer_conv_kernel 7
+python phase2_finetune.py --encoder_arch conformer --encoder_layers 4 --encoder_heads 8 --conformer_conv_kernel 7
+```
+
+## Hugging Face Dataset Access
+
+This project loads datasets from the Hugging Face Hub (default: `bdanko/how2sign-landmarks-front-raw-parquet`).
+
+If you hit authentication errors (gated datasets) or want to force a token, set one of these environment variables:
+
+- `HF_TOKEN` (preferred)
+- `HUGGINGFACE_HUB_TOKEN`
+
+PowerShell example:
+
+```powershell
+$env:HF_TOKEN = "hf_...your_read_token..."
+python phase1_pretrain.py --smoke_test true
+```
+
+## NVIDIA GPU / CUDA
+
+If PyTorch detects CUDA, training will use the GPU when you pass `--device cuda` (or leave `--device auto`).
+
+Recommended speed flags on NVIDIA GPUs:
+
+- `--mixed_precision true` (AMP)
+- `--streaming false` if you have disk space (avoids repeated network reads)
+
+### Windows note: pyarrow access violations
+
+If you see `Windows fatal exception: access violation` with a stack trace inside `pyarrow`/`pandas`/`datasets`,
+use the pinned Windows requirements file:
+
+```powershell
+py -3.12 -m pip uninstall -y pyarrow pandas datasets
+py -3.12 -m pip install -U pip
+py -3.12 -m pip install -r requirements-windows-py312-cu121.txt --index-url https://download.pytorch.org/whl/cu121 --extra-index-url https://pypi.org/simple
+```
+
 ## Architecture
 
 ```

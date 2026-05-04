@@ -34,8 +34,8 @@ from config import Phase1Config, parse_phase1_args, save_config
 from data import create_dataloader
 from models import (
     DDPMNoiseSchedule,
-    MultiStreamSemanticEncoder,
     StructuredDiffusionDecoder,
+    build_encoder_from_config,
 )
 from utils import (
     TrainLogger,
@@ -47,7 +47,8 @@ from utils import (
     create_scheduler,
     flatten_features,
     get_autocast_context,
-    get_device,
+    enable_torch_gpu_perf_knobs,
+    resolve_device,
     get_git_hash,
     get_grad_scaler,
     save_checkpoint,
@@ -79,7 +80,8 @@ class Phase1Model(torch.nn.Module):
 # Main training function
 # ---------------------------------------------------------------------------
 def train_phase1(cfg: Phase1Config):
-    device = get_device()
+    device = resolve_device(getattr(cfg, "device", "auto"))
+    enable_torch_gpu_perf_knobs(device)
     set_seed(cfg.seed)
 
     logger.info(f"Device: {device}")
@@ -114,14 +116,7 @@ def train_phase1(cfg: Phase1Config):
     )
 
     # --- Models ---
-    encoder = MultiStreamSemanticEncoder(
-        d_model=cfg.d_model,
-        latent_dim=cfg.latent_dim,
-        num_layers=cfg.encoder_layers,
-        nhead=cfg.encoder_heads,
-        dropout=cfg.encoder_dropout,
-        use_part_embeddings=cfg.use_part_embeddings,
-    ).to(device)
+    encoder = build_encoder_from_config(cfg).to(device)
 
     decoder = StructuredDiffusionDecoder(latent_dim=cfg.latent_dim).to(device)
     noise_schedule = DDPMNoiseSchedule(

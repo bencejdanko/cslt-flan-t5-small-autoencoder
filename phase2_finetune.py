@@ -33,7 +33,7 @@ from transformers import T5Tokenizer
 
 from config import Phase2Config, parse_phase2_args, save_config
 from data import create_dataloader
-from models import MultiStreamSemanticEncoder, SignToTextModel
+from models import SignToTextModel, build_encoder_from_config
 from utils import (
     TrainLogger,
     compute_metrics,
@@ -41,7 +41,8 @@ from utils import (
     create_optimizer,
     create_scheduler,
     get_autocast_context,
-    get_device,
+    enable_torch_gpu_perf_knobs,
+    resolve_device,
     get_grad_scaler,
     load_encoder_from_phase1,
     print_sample_predictions,
@@ -131,7 +132,8 @@ def setup_for_stage(
 # Main training function
 # ---------------------------------------------------------------------------
 def train_phase2(cfg: Phase2Config):
-    device = get_device()
+    device = resolve_device(getattr(cfg, "device", "auto"))
+    enable_torch_gpu_perf_knobs(device)
     set_seed(cfg.seed)
 
     logger.info(f"Device: {device}")
@@ -173,14 +175,7 @@ def train_phase2(cfg: Phase2Config):
     )
 
     # --- Model ---
-    encoder = MultiStreamSemanticEncoder(
-        d_model=cfg.d_model,
-        latent_dim=cfg.latent_dim,
-        num_layers=cfg.encoder_layers,
-        nhead=cfg.encoder_heads,
-        dropout=cfg.encoder_dropout,
-        use_part_embeddings=cfg.use_part_embeddings,
-    ).to(device)
+    encoder = build_encoder_from_config(cfg).to(device)
 
     # Load Phase 1 encoder weights
     if os.path.exists(cfg.phase1_ckpt):

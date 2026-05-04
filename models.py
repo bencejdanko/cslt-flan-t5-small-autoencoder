@@ -183,6 +183,254 @@ class MultiStreamSemanticEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Conformer blocks (alternative temporal encoder)
+# ---------------------------------------------------------------------------
+class _ConformerFeedForward(nn.Module):
+    def __init__(self, d_model: int, mult: int = 4, dropout: float = 0.1):
+        super().__init__()
+        hidden = d_model * mult
+        self.net = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class _ConformerConvModule(nn.Module):
+    """
+    Conformer convolution module:
+      LN -> PWConv(2d) -> GLU -> DWConv -> BN -> SiLU -> PWConv -> Dropout
+
+    Operates over time dimension (T) with channels = d_model.
+    """
+
+    def __init__(self, d_model: int, kernel_size: int = 7, dropout: float = 0.1):
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("conformer_conv_kernel must be odd for 'same' padding.")
+
+        self.norm = nn.LayerNorm(d_model)
+        self.pw1 = nn.Conv1d(d_model, 2 * d_model, kernel_size=1)
+        self.dw = nn.Conv1d(
+            d_model,
+            d_model,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=d_model,
+        )
+        self.bn = nn.BatchNorm1d(d_model)
+        self.pw2 = nn.Conv1d(d_model, d_model, kernel_size=1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self, x: torch.Tensor, padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        # x: [B, T, D]
+        x = self.norm(x)
+        if padding_mask is not None:
+            x = x.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+
+        y = x.transpose(1, 2)  # [B, D, T]
+        y = self.pw1(y)
+        y = F.glu(y, dim=1)  # [B, D, T]
+        y = self.dw(y)
+        y = self.bn(y)
+        y = F.silu(y)
+        y = self.pw2(y)
+        y = self.dropout(y)
+        y = y.transpose(1, 2)  # [B, T, D]
+
+        if padding_mask is not None:
+            y = y.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+        return y
+
+
+class ConformerBlock(nn.Module):
+    """
+    A compact Conformer block (Macaron style):
+      x + 0.5*FFN -> x + MHSA -> x + Conv -> x + 0.5*FFN -> LN
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        ff_mult: int = 4,
+        conv_kernel: int = 7,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.ff1_norm = nn.LayerNorm(d_model)
+        self.ff1 = _ConformerFeedForward(d_model, mult=ff_mult, dropout=dropout)
+
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=nhead,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.attn_dropout = nn.Dropout(dropout)
+
+        self.conv = _ConformerConvModule(
+            d_model, kernel_size=conv_kernel, dropout=dropout
+        )
+
+        self.ff2_norm = nn.LayerNorm(d_model)
+        self.ff2 = _ConformerFeedForward(d_model, mult=ff_mult, dropout=dropout)
+
+        self.out_norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = x + 0.5 * self.ff1(self.ff1_norm(x))
+
+        attn_in = self.attn_norm(x)
+        attn_out, _ = self.attn(
+            attn_in, attn_in, attn_in, key_padding_mask=key_padding_mask
+        )
+        x = x + self.attn_dropout(attn_out)
+
+        x = x + self.conv(x, padding_mask=key_padding_mask)
+
+        x = x + 0.5 * self.ff2(self.ff2_norm(x))
+        return self.out_norm(x)
+
+
+class MultiStreamConformerEncoder(nn.Module):
+    """
+    Drop-in alternative to MultiStreamSemanticEncoder using Conformer blocks
+    for temporal modeling.
+    """
+
+    def __init__(
+        self,
+        d_model: int = 384,
+        latent_dim: int = 512,
+        num_layers: int = 4,
+        nhead: int = 8,
+        dropout: float = 0.1,
+        use_part_embeddings: bool = True,
+        conformer_ff_mult: int = 4,
+        conformer_conv_kernel: int = 7,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.latent_dim = latent_dim
+        part_dim = d_model // 4
+
+        self.body_encoder = PartSpatialEncoder(33 * 3 * 2, part_dim)
+        self.face_encoder = PartSpatialEncoder(15 * 3 * 2, part_dim)
+        self.lhand_encoder = PartSpatialEncoder(21 * 3 * 2, part_dim)
+        self.rhand_encoder = PartSpatialEncoder(21 * 3 * 2, part_dim)
+
+        self.use_part_embeddings = use_part_embeddings
+        if use_part_embeddings:
+            self.part_embeddings = nn.ParameterDict(
+                {
+                    "body": nn.Parameter(torch.randn(1, 1, part_dim) * 0.02),
+                    "face": nn.Parameter(torch.randn(1, 1, part_dim) * 0.02),
+                    "lhand": nn.Parameter(torch.randn(1, 1, part_dim) * 0.02),
+                    "rhand": nn.Parameter(torch.randn(1, 1, part_dim) * 0.02),
+                }
+            )
+
+        self.fusion = nn.Sequential(
+            nn.Linear(part_dim * 4, d_model),
+            nn.GELU(),
+            nn.LayerNorm(d_model),
+        )
+
+        self.pos_encoder = PositionalEncoding(d_model)
+        self.blocks = nn.ModuleList(
+            [
+                ConformerBlock(
+                    d_model=d_model,
+                    nhead=nhead,
+                    ff_mult=conformer_ff_mult,
+                    conv_kernel=conformer_conv_kernel,
+                    dropout=dropout,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        # Temporal downsampling (stride 2 twice -> 4x compression)
+        self.downsample = nn.Conv1d(
+            d_model, latent_dim, kernel_size=3, stride=2, padding=1
+        )
+        self.downsample2 = nn.Conv1d(
+            latent_dim, latent_dim, kernel_size=3, stride=2, padding=1
+        )
+        self.norm = nn.LayerNorm(latent_dim)
+
+    def forward(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        body = torch.cat([inputs["body_pos"], inputs["body_vel"]], dim=-1)
+        face = torch.cat([inputs["face_pos"], inputs["face_vel"]], dim=-1)
+        lhand = torch.cat([inputs["lhand_pos"], inputs["lhand_vel"]], dim=-1)
+        rhand = torch.cat([inputs["rhand_pos"], inputs["rhand_vel"]], dim=-1)
+
+        b_feat = self.body_encoder(body)
+        f_feat = self.face_encoder(face)
+        l_feat = self.lhand_encoder(lhand)
+        r_feat = self.rhand_encoder(rhand)
+
+        if self.use_part_embeddings:
+            b_feat = b_feat + self.part_embeddings["body"]
+            f_feat = f_feat + self.part_embeddings["face"]
+            l_feat = l_feat + self.part_embeddings["lhand"]
+            r_feat = r_feat + self.part_embeddings["rhand"]
+
+        x = self.fusion(torch.cat([b_feat, f_feat, l_feat, r_feat], dim=-1))
+        x = self.pos_encoder(x)
+
+        for block in self.blocks:
+            x = block(x, key_padding_mask=src_key_padding_mask)
+
+        x = x.transpose(1, 2)  # [B, D, T]
+        x = F.gelu(self.downsample(x))
+        x = F.gelu(self.downsample2(x))
+        x = x.transpose(1, 2)  # [B, T', latent_dim]
+        return self.norm(x)
+
+
+def build_encoder_from_config(cfg) -> nn.Module:
+    """Build an encoder from Phase1Config/Phase2Config-like objects."""
+    arch = getattr(cfg, "encoder_arch", "transformer")
+    if arch == "conformer":
+        return MultiStreamConformerEncoder(
+            d_model=cfg.d_model,
+            latent_dim=cfg.latent_dim,
+            num_layers=cfg.encoder_layers,
+            nhead=cfg.encoder_heads,
+            dropout=cfg.encoder_dropout,
+            use_part_embeddings=cfg.use_part_embeddings,
+            conformer_ff_mult=getattr(cfg, "conformer_ff_mult", 4),
+            conformer_conv_kernel=getattr(cfg, "conformer_conv_kernel", 7),
+        )
+    if arch == "transformer":
+        return MultiStreamSemanticEncoder(
+            d_model=cfg.d_model,
+            latent_dim=cfg.latent_dim,
+            num_layers=cfg.encoder_layers,
+            nhead=cfg.encoder_heads,
+            dropout=cfg.encoder_dropout,
+            use_part_embeddings=cfg.use_part_embeddings,
+        )
+    raise ValueError(f"Unknown encoder_arch: {arch}")
+
+
+# ---------------------------------------------------------------------------
 # DDPM noise schedule
 # ---------------------------------------------------------------------------
 class DDPMNoiseSchedule(nn.Module):
